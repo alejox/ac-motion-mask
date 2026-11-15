@@ -18,6 +18,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <obs-module.h>
 #include <graphics/vec2.h>
+#include <graphics/vec4.h>
 #include <util/dstr.h>
 #include <util/threading.h>
 #include <math.h>
@@ -89,7 +90,7 @@ struct motion_mask {
 	int mask_type;
 	struct vec2 mask_center;
 	struct vec2 mask_size;
-	float corner_radius;
+	struct vec4 corner_radii; /* tl, tr, br, bl */
 	float feather;
 	bool invert;
 	int image_channel;
@@ -135,7 +136,7 @@ struct motion_mask {
 	gs_eparam_t *p_source_size;
 	gs_eparam_t *p_mask_center;
 	gs_eparam_t *p_mask_size;
-	gs_eparam_t *p_corner_radius;
+	gs_eparam_t *p_corner_radii;
 	gs_eparam_t *p_feather;
 	gs_eparam_t *p_invert_mask;
 	gs_eparam_t *p_image_channel;
@@ -443,7 +444,7 @@ static void motion_mask_render(void *data, gs_effect_t *effect)
 	gs_effect_set_vec2(f->p_source_size, &source_size);
 	gs_effect_set_vec2(f->p_mask_center, &f->mask_center);
 	gs_effect_set_vec2(f->p_mask_size, &mask_size);
-	gs_effect_set_float(f->p_corner_radius, f->corner_radius);
+	gs_effect_set_vec4(f->p_corner_radii, &f->corner_radii);
 	gs_effect_set_float(f->p_feather, f->feather);
 	gs_effect_set_float(f->p_invert_mask, f->invert ? 1.0f : 0.0f);
 	gs_effect_set_float(f->p_image_channel, (float)f->image_channel);
@@ -505,7 +506,15 @@ static void motion_mask_update(void *data, obs_data_t *settings)
 	f->mask_size.y = (float)obs_data_get_double(settings, "mask_height") / 100.0f;
 	f->mask_center.x = (float)obs_data_get_double(settings, "mask_x") / 100.0f;
 	f->mask_center.y = (float)obs_data_get_double(settings, "mask_y") / 100.0f;
-	f->corner_radius = (float)obs_data_get_double(settings, "corner_radius") / 100.0f;
+	if (obs_data_get_bool(settings, "corner_individual")) {
+		vec4_set(&f->corner_radii, (float)obs_data_get_double(settings, "corner_tl") / 100.0f,
+			 (float)obs_data_get_double(settings, "corner_tr") / 100.0f,
+			 (float)obs_data_get_double(settings, "corner_br") / 100.0f,
+			 (float)obs_data_get_double(settings, "corner_bl") / 100.0f);
+	} else {
+		float r = (float)obs_data_get_double(settings, "corner_radius") / 100.0f;
+		vec4_set(&f->corner_radii, r, r, r, r);
+	}
 	f->feather = (float)obs_data_get_double(settings, "feather");
 	f->invert = obs_data_get_bool(settings, "invert");
 	f->image_channel = (int)obs_data_get_int(settings, "image_channel");
@@ -526,12 +535,18 @@ static void motion_mask_update(void *data, obs_data_t *settings)
 
 static void motion_mask_defaults(obs_data_t *settings)
 {
+	obs_data_set_default_int(settings, "preset", 0);
 	obs_data_set_default_int(settings, "mask_type", MASK_RECT);
 	obs_data_set_default_double(settings, "mask_width", 100.0);
 	obs_data_set_default_double(settings, "mask_height", 100.0);
 	obs_data_set_default_double(settings, "mask_x", 50.0);
 	obs_data_set_default_double(settings, "mask_y", 50.0);
 	obs_data_set_default_double(settings, "corner_radius", 15.0);
+	obs_data_set_default_bool(settings, "corner_individual", false);
+	obs_data_set_default_double(settings, "corner_tl", 15.0);
+	obs_data_set_default_double(settings, "corner_tr", 15.0);
+	obs_data_set_default_double(settings, "corner_br", 15.0);
+	obs_data_set_default_double(settings, "corner_bl", 15.0);
 	obs_data_set_default_double(settings, "feather", 0.0);
 	obs_data_set_default_bool(settings, "invert", false);
 	obs_data_set_default_int(settings, "image_channel", 0);
@@ -564,7 +579,13 @@ static bool mask_type_changed(obs_properties_t *props, obs_property_t *p, obs_da
 	obs_property_set_visible(obs_properties_get(props, "mask_height"), box && type != MASK_CIRCLE);
 	obs_property_set_visible(obs_properties_get(props, "mask_x"), box);
 	obs_property_set_visible(obs_properties_get(props, "mask_y"), box);
-	obs_property_set_visible(obs_properties_get(props, "corner_radius"), type == MASK_RECT);
+	bool individual = obs_data_get_bool(settings, "corner_individual");
+	obs_property_set_visible(obs_properties_get(props, "corner_individual"), type == MASK_RECT);
+	obs_property_set_visible(obs_properties_get(props, "corner_radius"), type == MASK_RECT && !individual);
+	obs_property_set_visible(obs_properties_get(props, "corner_tl"), type == MASK_RECT && individual);
+	obs_property_set_visible(obs_properties_get(props, "corner_tr"), type == MASK_RECT && individual);
+	obs_property_set_visible(obs_properties_get(props, "corner_br"), type == MASK_RECT && individual);
+	obs_property_set_visible(obs_properties_get(props, "corner_bl"), type == MASK_RECT && individual);
 	obs_property_set_visible(obs_properties_get(props, "feather"), shape);
 	obs_property_set_visible(obs_properties_get(props, "image_path"), image);
 	obs_property_set_visible(obs_properties_get(props, "image_channel"), image);
@@ -572,6 +593,86 @@ static bool mask_type_changed(obs_properties_t *props, obs_property_t *p, obs_da
 	obs_property_set_visible(obs_properties_get(props, "grad_pos"), gradient);
 	obs_property_set_visible(obs_properties_get(props, "grad_width"), gradient);
 	obs_property_set_visible(obs_properties_get(props, "invert"), type != MASK_NONE);
+	return true;
+}
+
+static bool anim_changed(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(p);
+	bool has_in = obs_data_get_int(settings, "anim_in") != ANIM_NONE;
+	bool has_out = obs_data_get_int(settings, "anim_out") != ANIM_NONE;
+	bool any = has_in || has_out;
+
+	obs_property_set_visible(obs_properties_get(props, "easing"), any);
+	obs_property_set_visible(obs_properties_get(props, "duration"), any);
+	obs_property_set_visible(obs_properties_get(props, "delay"), has_in);
+	obs_property_set_visible(obs_properties_get(props, "test_in"), has_in);
+	obs_property_set_visible(obs_properties_get(props, "test_out"), has_out);
+	obs_property_set_visible(obs_properties_get(props, "out_hint"), has_out);
+	return true;
+}
+
+enum preset_type {
+	PRESET_CHOOSE = 0,
+	PRESET_ROUND_CAM,
+	PRESET_CARD,
+	PRESET_SOFT,
+	PRESET_SLIDE,
+	PRESET_WIPE,
+	PRESET_BOUNCE,
+};
+
+static void set_preset(obs_data_t *settings, int mask, double width, double radius, int anim_in, int anim_out,
+		       int easing, int duration)
+{
+	obs_data_set_int(settings, "mask_type", mask);
+	obs_data_set_double(settings, "mask_width", width);
+	obs_data_set_double(settings, "mask_height", width);
+	obs_data_set_double(settings, "mask_x", 50.0);
+	obs_data_set_double(settings, "mask_y", 50.0);
+	obs_data_set_bool(settings, "corner_individual", false);
+	obs_data_set_double(settings, "corner_radius", radius);
+	obs_data_set_double(settings, "feather", 0.0);
+	obs_data_set_bool(settings, "invert", false);
+	obs_data_set_int(settings, "anim_in", anim_in);
+	obs_data_set_int(settings, "anim_out", anim_out);
+	obs_data_set_int(settings, "easing", easing);
+	obs_data_set_int(settings, "duration", duration);
+	obs_data_set_int(settings, "delay", 0);
+}
+
+static bool preset_changed(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
+{
+	int preset = (int)obs_data_get_int(settings, "preset");
+
+	switch (preset) {
+	case PRESET_ROUND_CAM:
+		set_preset(settings, MASK_CIRCLE, 90.0, 15.0, ANIM_ZOOM, ANIM_ZOOM, EASE_BACK, 500);
+		break;
+	case PRESET_CARD:
+		set_preset(settings, MASK_RECT, 100.0, 15.0, ANIM_MASK, ANIM_FADE, EASE_OUT, 450);
+		break;
+	case PRESET_SOFT:
+		set_preset(settings, MASK_NONE, 100.0, 15.0, ANIM_FADE, ANIM_FADE, EASE_IN_OUT, 400);
+		break;
+	case PRESET_SLIDE:
+		set_preset(settings, MASK_RECT, 100.0, 10.0, ANIM_SLIDE_LEFT, ANIM_SLIDE_LEFT, EASE_OUT, 500);
+		break;
+	case PRESET_WIPE:
+		set_preset(settings, MASK_NONE, 100.0, 15.0, ANIM_WIPE_RIGHT, ANIM_WIPE_LEFT, EASE_IN_OUT, 600);
+		break;
+	case PRESET_BOUNCE:
+		set_preset(settings, MASK_RECT, 100.0, 15.0, ANIM_ZOOM, ANIM_ZOOM, EASE_BOUNCE, 700);
+		break;
+	default:
+		return false;
+	}
+
+	/* a preset is a one-shot action: go back to "choose" so reopening the
+	 * dialog never overwrites manual tweaks */
+	obs_data_set_int(settings, "preset", PRESET_CHOOSE);
+	mask_type_changed(props, p, settings);
+	anim_changed(props, p, settings);
 	return true;
 }
 
@@ -596,6 +697,7 @@ static bool test_out_clicked(obs_properties_t *props, obs_property_t *p, void *d
 static void add_anim_list(obs_properties_t *props, const char *name, const char *label)
 {
 	obs_property_t *p = obs_properties_add_list(props, name, label, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_set_modified_callback(p, anim_changed);
 	obs_property_list_add_int(p, T_("Anim.None"), ANIM_NONE);
 	obs_property_list_add_int(p, T_("Anim.Fade"), ANIM_FADE);
 	obs_property_list_add_int(p, T_("Anim.Zoom"), ANIM_ZOOM);
@@ -615,6 +717,18 @@ static obs_properties_t *motion_mask_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 	obs_property_t *p;
 
+	/* --- quick style --- */
+	p = obs_properties_add_list(props, "preset", T_("Preset"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, T_("Preset.Choose"), PRESET_CHOOSE);
+	obs_property_list_add_int(p, T_("Preset.RoundCam"), PRESET_ROUND_CAM);
+	obs_property_list_add_int(p, T_("Preset.Card"), PRESET_CARD);
+	obs_property_list_add_int(p, T_("Preset.Soft"), PRESET_SOFT);
+	obs_property_list_add_int(p, T_("Preset.Slide"), PRESET_SLIDE);
+	obs_property_list_add_int(p, T_("Preset.Wipe"), PRESET_WIPE);
+	obs_property_list_add_int(p, T_("Preset.Bounce"), PRESET_BOUNCE);
+	obs_property_set_long_description(p, T_("Preset.Tip"));
+	obs_property_set_modified_callback(p, preset_changed);
+
 	/* --- mask --- */
 	obs_properties_t *mask = obs_properties_create();
 
@@ -633,6 +747,7 @@ static obs_properties_t *motion_mask_properties(void *data)
 				    OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(p, T_("Mask.ChannelAlpha"), 0);
 	obs_property_list_add_int(p, T_("Mask.ChannelLuma"), 1);
+	obs_property_set_long_description(p, T_("Mask.ImageChannel.Tip"));
 
 	p = obs_properties_add_float_slider(mask, "mask_width", T_("Mask.Width"), 1.0, 200.0, 0.5);
 	obs_property_float_set_suffix(p, " %");
@@ -643,6 +758,16 @@ static obs_properties_t *motion_mask_properties(void *data)
 	p = obs_properties_add_float_slider(mask, "mask_y", T_("Mask.Y"), 0.0, 100.0, 0.5);
 	obs_property_float_set_suffix(p, " %");
 	p = obs_properties_add_float_slider(mask, "corner_radius", T_("Mask.CornerRadius"), 0.0, 100.0, 0.5);
+	obs_property_float_set_suffix(p, " %");
+	p = obs_properties_add_bool(mask, "corner_individual", T_("Mask.CornerIndividual"));
+	obs_property_set_modified_callback(p, mask_type_changed);
+	p = obs_properties_add_float_slider(mask, "corner_tl", T_("Mask.CornerTL"), 0.0, 100.0, 0.5);
+	obs_property_float_set_suffix(p, " %");
+	p = obs_properties_add_float_slider(mask, "corner_tr", T_("Mask.CornerTR"), 0.0, 100.0, 0.5);
+	obs_property_float_set_suffix(p, " %");
+	p = obs_properties_add_float_slider(mask, "corner_bl", T_("Mask.CornerBL"), 0.0, 100.0, 0.5);
+	obs_property_float_set_suffix(p, " %");
+	p = obs_properties_add_float_slider(mask, "corner_br", T_("Mask.CornerBR"), 0.0, 100.0, 0.5);
 	obs_property_float_set_suffix(p, " %");
 	p = obs_properties_add_float_slider(mask, "feather", T_("Mask.Feather"), 0.0, 300.0, 1.0);
 	obs_property_float_set_suffix(p, " px");
@@ -680,9 +805,11 @@ static obs_properties_t *motion_mask_properties(void *data)
 	p = obs_properties_add_list(anim, "trigger", T_("Anim.Trigger"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	obs_property_list_add_int(p, T_("Trigger.OnShow"), TRIGGER_ON_SHOW);
 	obs_property_list_add_int(p, T_("Trigger.Manual"), TRIGGER_MANUAL);
+	obs_property_set_long_description(p, T_("Trigger.Tip"));
 
 	obs_properties_add_button2(anim, "test_in", T_("Anim.TestIn"), test_in_clicked, data);
 	obs_properties_add_button2(anim, "test_out", T_("Anim.TestOut"), test_out_clicked, data);
+	p = obs_properties_add_text(anim, "out_hint", T_("Anim.OutHint"), OBS_TEXT_INFO);
 
 	obs_properties_add_group(props, "anim_group", T_("Group.Animation"), OBS_GROUP_NORMAL, anim);
 
@@ -746,7 +873,7 @@ static void *motion_mask_create(obs_data_t *settings, obs_source_t *context)
 		f->p_source_size = gs_effect_get_param_by_name(f->effect, "source_size");
 		f->p_mask_center = gs_effect_get_param_by_name(f->effect, "mask_center");
 		f->p_mask_size = gs_effect_get_param_by_name(f->effect, "mask_size");
-		f->p_corner_radius = gs_effect_get_param_by_name(f->effect, "corner_radius");
+		f->p_corner_radii = gs_effect_get_param_by_name(f->effect, "corner_radii");
 		f->p_feather = gs_effect_get_param_by_name(f->effect, "feather");
 		f->p_invert_mask = gs_effect_get_param_by_name(f->effect, "invert_mask");
 		f->p_image_channel = gs_effect_get_param_by_name(f->effect, "image_channel");

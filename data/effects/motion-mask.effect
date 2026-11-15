@@ -10,7 +10,7 @@ uniform int mask_type;
 uniform float2 source_size;   // pixels
 uniform float2 mask_center;   // 0..1
 uniform float2 mask_size;     // 0..1 of the source (already animated)
-uniform float corner_radius;  // 0..1 of the shortest half side
+uniform float4 corner_radii;  // top-left, top-right, bottom-right, bottom-left; 0..1 of the shortest half side
 uniform float feather;        // pixels
 uniform float invert_mask;    // 0 or 1
 uniform float image_channel;  // 0 alpha, 1 luminance
@@ -66,7 +66,11 @@ float mask_value(float2 uv)
 	float m = 1.0;
 
 	if (mask_type == 1) {
-		float r = clamp(corner_radius, 0.0, 1.0) * short_half;
+		float side_x = step(0.0, p.x);
+		float side_y = step(0.0, p.y);
+		float r_top = lerp(corner_radii.x, corner_radii.y, side_x);
+		float r_bottom = lerp(corner_radii.w, corner_radii.z, side_x);
+		float r = clamp(lerp(r_top, r_bottom, side_y), 0.0, 1.0) * short_half;
 		float2 q = abs(p) - half_size + float2(r, r);
 		float d = length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
 		m = shape_alpha(d, soft);
