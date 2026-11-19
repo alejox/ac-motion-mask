@@ -11,6 +11,7 @@ A single OBS Studio filter that combines **masks** and **motion** — set up in 
 - **Estilos de movimiento:** lineal, suave, con rebase, elástico y rebote.
 - **Disparo automático** cuando la fuente aparece, o manual con atajos de teclado (entrada, salida, alternar).
 - Botones **Probar entrada / Probar salida** dentro del filtro.
+- **Panel AC Motion:** guarda tantas posiciones como quieras para cualquier fuente (posición, tamaño, rotación y recorte) y muévela entre ellas en vivo con animación.
 
 ## Uso
 
@@ -19,6 +20,16 @@ A single OBS Studio filter that combines **masks** and **motion** — set up in 
 3. Elige la animación de **entrada** y **salida**. Listo.
 
 Los atajos se asignan en *Ajustes → Atajos*, bajo el nombre de la fuente.
+
+### Mover la fuente por la pantalla (panel AC Motion)
+
+1. Abre el panel en *Paneles → AC Motion*.
+2. Selecciona la fuente en la escena, colócala donde quieras y pulsa **Guardar posición**. Repite para cada lugar.
+3. En vivo: doble clic en una posición, **Mover aquí**, ◀ ▶ o los atajos *AC Motion: ir a la posición 1–9 / siguiente / anterior*.
+
+- **Fijar** mantiene el panel en esa fuente aunque selecciones otra.
+- Cada escena guarda sus propias posiciones; en Modo Estudio se mueve la fuente en Programa usando el mismo nombre de posición.
+- Clic derecho en una posición para renombrarla, actualizarla o eliminarla.
 
 > Nota: la animación ocurre dentro del área de la propia fuente. La salida se dispara con atajo o botón (OBS no avisa a un filtro antes de ocultar la fuente).
 
