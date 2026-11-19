@@ -103,34 +103,61 @@ jobs:
             done
           done
 
-      - name: Create macOS Plugin Zip 📦
+      - name: Checkout Repository 🛒
         if: fromJSON(steps.check.outputs.validTag)
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Create Plugin Archives 📦
+        # What people copy to their plugins folder by hand and what the plugin's updater
+        # downloads: <name>-<version>-macos.zip (the .plugin bundle) and
+        # <name>-<version>-linux-x86_64.tar.gz (<name>/bin/64bit/<name>.so + <name>/data).
+        # The Windows zip from the build already has the <name>/bin/64bit + <name>/data shape.
+        if: fromJSON(steps.check.outputs.validTag)
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
-          : Create macOS Plugin Zip 📦
+          : Create Plugin Archives 📦
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s nullglob
+          name="$(jq -r '.name' repo/buildspec.json)"
 
-          for archive in *-macos-universal.tar.xz; do
-            mkdir -p macos-plugin
-            tar -xJf "${archive}" -C macos-plugin
-            plugin_dir="$(find macos-plugin -type d -name '*.plugin' | head -n 1)"
-            if [[ "${plugin_dir}" ]]; then
-              (cd "$(dirname "${plugin_dir}")" && zip -qry "${GITHUB_WORKSPACE}/${archive%.tar.xz}-plugin.zip" "$(basename "${plugin_dir}")")
-            fi
-            rm -rf macos-plugin
+          for pkg in *-macos-universal.pkg; do
+            python3 -I repo/.github/scripts/pkg-to-plugin-zip.py "${pkg}" "${name}-${VERSION}-macos.zip"
+            unzip -l "${name}-${VERSION}-macos.zip"
           done
 
-      - name: Generate Checksums 🪪
+          for deb in *-x86_64-linux-gnu.deb; do
+            rm -rf deb-root linux-package
+            dpkg-deb -x "${deb}" deb-root
+            mkdir -p "linux-package/${name}/bin/64bit"
+            cp deb-root/usr/lib/*/obs-plugins/"${name}".so "linux-package/${name}/bin/64bit/"
+            cp -r deb-root/usr/share/obs/obs-plugins/"${name}" "linux-package/${name}/data"
+            tar -czf "${name}-${VERSION}-linux-x86_64.tar.gz" -C linux-package "${name}"
+            tar -tzf "${name}-${VERSION}-linux-x86_64.tar.gz"
+            rm -rf deb-root linux-package
+          done
+
+      - name: Release Notes And Checksums 🪪
+        # The notes come from the "## <version>" section of CHANGELOG.md ("### Español" and
+        # "### English" lists): the plugin shows them before updating and after restarting.
         if: fromJSON(steps.check.outputs.validTag)
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
-          : Generate Checksums 🪪
+          : Release Notes And Checksums 🪪
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
-          shopt -s extglob
+          shopt -s extglob nullglob
 
-          echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
-          for file in ${{ github.workspace }}/@(*.exe|*.deb|*.ddeb|*.pkg|*.tar.xz|*.zip); do
-            echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
-          done
+          awk -v v="## ${VERSION}" '$0==v{on=1;next} /^## /{on=0} on' repo/CHANGELOG.md > NOTES.md
+          if ! grep -q '[^[:space:]]' NOTES.md; then
+            echo "Release ${VERSION}" > NOTES.md
+          fi
+          cat NOTES.md
+
+          sha256sum -- @(*.exe|*.deb|*.ddeb|*.pkg|*.tar.xz|*.tar.gz|*.zip) > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create Release 🛫
         if: fromJSON(steps.check.outputs.validTag)
@@ -142,7 +169,7 @@ jobs:
           prerelease: ${{ fromJSON(steps.check.outputs.prerelease) }}
           tag_name: ${{ steps.check.outputs.version }}
           name: ${{ needs.build-project.outputs.pluginName }} ${{ steps.check.outputs.version }}
-          body_path: ${{ github.workspace }}/CHECKSUMS.txt
+          body_path: ${{ github.workspace }}/NOTES.md
           files: |
             ${{ github.workspace }}/*.exe
             ${{ github.workspace }}/*.zip
@@ -150,3 +177,5 @@ jobs:
             ${{ github.workspace }}/*.deb
             ${{ github.workspace }}/*.ddeb
             ${{ github.workspace }}/*.tar.xz
+            ${{ github.workspace }}/*.tar.gz
+            ${{ github.workspace }}/SHA256SUMS

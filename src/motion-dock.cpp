@@ -17,6 +17,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "motion-dock.hpp"
+#include "updater.hpp"
 
 extern "C" {
 #include "motion-engine.h"
@@ -42,8 +43,9 @@ extern "C" {
 #include <QUrl>
 #include <QVBoxLayout>
 
-#define KOFI_URL "https://ko-fi.com/alejoxcode"
 #define POSITION_HOTKEYS 9
+
+void acm_open_support_dialog_qt(QWidget *parent);
 
 static inline QString T(const char *key)
 {
@@ -112,6 +114,26 @@ MotionDock::MotionDock(QWidget *parent) : QWidget(parent)
 	header->addWidget(lockButton);
 	layout->addLayout(header);
 
+	/* update notice (hidden until a newer release is found) */
+	updateBanner = new QWidget();
+	auto *bannerLayout = new QHBoxLayout(updateBanner);
+	bannerLayout->setContentsMargins(8, 6, 8, 6);
+	updateText = new QLabel();
+	updateText->setWordWrap(true);
+	auto *updateNow = new QPushButton(T("Update.Now"));
+	bannerLayout->addWidget(updateText, 1);
+	bannerLayout->addWidget(updateNow);
+	updateBanner->setStyleSheet(
+		QStringLiteral("QWidget#acmUpdate { border: 1px solid palette(highlight); border-radius: 6px; }"));
+	updateBanner->setObjectName(QStringLiteral("acmUpdate"));
+	updateBanner->setVisible(false);
+	layout->addWidget(updateBanner);
+	connect(updateNow, &QPushButton::clicked, this, [] { acm::Updater::instance().update(); });
+	connect(&acm::Updater::instance(), &acm::Updater::updateAvailable, this, [this](const acm::Release &release) {
+		updateText->setText(T("Update.Available").arg(release.version));
+		updateBanner->setVisible(true);
+	});
+
 	/* saved positions */
 	list = new QListWidget();
 	list->setMinimumHeight(110);
@@ -172,7 +194,7 @@ MotionDock::MotionDock(QWidget *parent) : QWidget(parent)
 	layout->addWidget(status);
 
 	/* Ko-fi */
-	auto *kofi = new QLabel(QStringLiteral("<a href=\"#\">%1</a>").arg(T("Kofi.Link").toHtmlEscaped()));
+	auto *kofi = new QLabel(QStringLiteral("<a href=\"#\">☕ %1</a>").arg(T("Support.Link").toHtmlEscaped()));
 	kofi->setAlignment(Qt::AlignCenter);
 	QFont small = kofi->font();
 	small.setPointSizeF(small.pointSizeF() * 0.9);
@@ -582,15 +604,7 @@ void MotionDock::GoPrevious()
 
 void MotionDock::ShowKofi()
 {
-	QMessageBox box(this);
-	box.setWindowTitle(T("Dock.Title"));
-	box.setText(QStringLiteral("<b>%1</b>").arg(T("Kofi.Title").toHtmlEscaped()));
-	box.setInformativeText(T("Kofi.Body"));
-	QPushButton *coffee = box.addButton(T("Kofi.Button"), QMessageBox::AcceptRole);
-	box.addButton(T("Kofi.Free"), QMessageBox::RejectRole);
-	box.exec();
-	if (box.clickedButton() == coffee)
-		QDesktopServices::openUrl(QUrl(QStringLiteral(KOFI_URL)));
+	acm_open_support_dialog_qt(this);
 }
 
 void MotionDock::SaveState(obs_data_t *data) const
@@ -701,10 +715,15 @@ extern "C" void acm_dock_load(void)
 	}
 
 	obs_frontend_add_save_callback(save_callback, nullptr);
+
+	obs_frontend_add_tools_menu_item(
+		obs_module_text("Update.CheckMenu"), [](void *) { acm::Updater::instance().check(true); }, nullptr);
+	acm::Updater::instance().start();
 }
 
 extern "C" void acm_dock_unload(void)
 {
+	acm::Updater::instance().stop();
 	obs_frontend_remove_save_callback(save_callback, nullptr);
 
 	obs_hotkey_unregister(hotkey_next);

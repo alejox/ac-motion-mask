@@ -36,7 +36,16 @@ endif()
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.c src/motion-mask-filter.c src/motion-engine.c src/motion-dock.cpp
+  PRIVATE
+    src/plugin-main.c
+    src/motion-mask-filter.c
+    src/motion-engine.c
+    src/motion-dock.cpp
+    src/motion-dock.hpp
+    src/updater.cpp
+    src/updater.hpp
+    src/updater-install.cpp
+    src/support-dialog.cpp
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

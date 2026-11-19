@@ -33,9 +33,19 @@ Los atajos se asignan en *Ajustes → Atajos*, bajo el nombre de la fuente.
 
 > Nota: la animación ocurre dentro del área de la propia fuente. La salida se dispara con atajo o botón (OBS no avisa a un filtro antes de ocultar la fuente).
 
+## Actualizaciones
+
+El plugin revisa al abrir OBS (y cada 12 horas) si hay una versión nueva. Si la hay, muestra sus novedades y ofrece **Actualizar ahora**: la descarga, comprueba su SHA-256 y la instala; solo hay que reiniciar OBS. También puedes buscar a mano en *Herramientas → AC Motion Mask: buscar actualizaciones*.
+
 ## Instalación
 
-Descarga el instalador desde [Releases](../../releases) (macOS `.pkg`, Windows `.exe`, Ubuntu `.deb`).
+Descarga desde [Releases](../../releases):
+
+- **macOS:** `ac-motion-mask-<versión>-macos.zip` → copia `ac-motion-mask.plugin` a `~/Library/Application Support/obs-studio/plugins/` (o usa el `.pkg`).
+- **Windows:** `ac-motion-mask-<versión>-windows-x64.zip` → copia la carpeta `ac-motion-mask` a `C:\ProgramData\obs-studio\plugins\`.
+- **Linux:** `ac-motion-mask-<versión>-linux-x86_64.tar.gz` → descomprímelo en `~/.config/obs-studio/plugins/` (o usa el `.deb`).
+
+Si te sirve, [invítame un café en Ko-fi](https://ko-fi.com/alejoxcode) ☕
 
 ## Compilar
 

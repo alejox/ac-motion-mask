@@ -77,6 +77,8 @@ private:
 	QSpinBox *duration;
 	QComboBox *easing;
 	QLabel *status;
+	QWidget *updateBanner;
+	QLabel *updateText;
 	QTimer *pollTimer;
 };
 

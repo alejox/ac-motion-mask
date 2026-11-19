@@ -24,6 +24,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <math.h>
 
 #define FILTER_ID "ac_motion_mask_filter"
+
+extern void acm_open_support_dialog(void);
 #define T_(key) obs_module_text(key)
 
 #ifndef M_PI
@@ -694,6 +696,15 @@ static bool test_out_clicked(obs_properties_t *props, obs_property_t *p, void *d
 	return false;
 }
 
+static bool support_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	UNUSED_PARAMETER(data);
+	acm_open_support_dialog();
+	return false;
+}
+
 static void add_anim_list(obs_properties_t *props, const char *name, const char *label)
 {
 	obs_property_t *p = obs_properties_add_list(props, name, label, OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -812,6 +823,8 @@ static obs_properties_t *motion_mask_properties(void *data)
 	p = obs_properties_add_text(anim, "out_hint", T_("Anim.OutHint"), OBS_TEXT_INFO);
 
 	obs_properties_add_group(props, "anim_group", T_("Group.Animation"), OBS_GROUP_NORMAL, anim);
+
+	obs_properties_add_button2(props, "support", T_("Support.Button"), support_clicked, NULL);
 
 	return props;
 }
