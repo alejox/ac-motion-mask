@@ -15,6 +15,7 @@
 !CMakePresets.json
 !LICENSE
 !README.md
+!CHANGELOG.md
 
 # Exclude lock files
 *.lock.json
