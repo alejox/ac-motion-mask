@@ -26,6 +26,8 @@ extern "C" {
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 
+#include <cstring>
+
 #include <QApplication>
 #include <QComboBox>
 #include <QDesktopServices>
@@ -88,6 +90,95 @@ static bool find_selected(obs_scene_t *scene, obs_sceneitem_t *item, void *param
 			return false;
 	}
 	return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* AC Motion Mask filter: its mask travels with each saved position    */
+
+#define MOTION_FILTER_ID "ac_motion_mask_filter"
+
+static const char *const mask_keys[] = {
+	"mask_type",     "mask_width", "mask_height", "mask_x",     "mask_y",  "corner_radius", "corner_individual",
+	"corner_tl",     "corner_tr",  "corner_br",   "corner_bl",  "feather", "invert",        "image_path",
+	"image_channel", "grad_angle", "grad_pos",    "grad_width",
+};
+
+struct filter_search {
+	obs_source_t *found;
+};
+
+static void find_motion_filter_cb(obs_source_t *, obs_source_t *filter, void *param)
+{
+	auto *search = static_cast<filter_search *>(param);
+	if (!search->found && strcmp(obs_source_get_unversioned_id(filter), MOTION_FILTER_ID) == 0)
+		search->found = obs_source_get_ref(filter);
+}
+
+/* First AC Motion Mask filter on the source (new reference), or nullptr. */
+static obs_source_t *find_motion_filter(obs_source_t *source)
+{
+	filter_search search = {nullptr};
+	if (source)
+		obs_source_enum_filters(source, find_motion_filter_cb, &search);
+	return search.found;
+}
+
+/* Copies the filter's current mask into the saved position. */
+static void save_mask(obs_sceneitem_t *item, obs_data_t *pos)
+{
+	obs_source_t *filter = find_motion_filter(obs_sceneitem_get_source(item));
+	if (!filter) {
+		obs_data_erase(pos, "mask");
+		return;
+	}
+	obs_data_t *settings = obs_source_get_settings(filter);
+	obs_data_t *mask = obs_data_create();
+	for (const char *key : mask_keys) {
+		obs_data_item_t *value = obs_data_item_byname(settings, key);
+		if (value) {
+			obs_data_item_release(&value);
+			if (strcmp(key, "image_path") == 0)
+				obs_data_set_string(mask, key, obs_data_get_string(settings, key));
+			else if (strcmp(key, "corner_individual") == 0 || strcmp(key, "invert") == 0)
+				obs_data_set_bool(mask, key, obs_data_get_bool(settings, key));
+			else if (strcmp(key, "mask_type") == 0 || strcmp(key, "image_channel") == 0)
+				obs_data_set_int(mask, key, obs_data_get_int(settings, key));
+			else
+				obs_data_set_double(mask, key, obs_data_get_double(settings, key));
+		} else {
+			/* never changed from its default: store the default so it is restored too */
+			if (strcmp(key, "image_path") == 0)
+				obs_data_set_string(mask, key, obs_data_get_default_string(settings, key));
+			else if (strcmp(key, "corner_individual") == 0 || strcmp(key, "invert") == 0)
+				obs_data_set_bool(mask, key, obs_data_get_default_bool(settings, key));
+			else if (strcmp(key, "mask_type") == 0 || strcmp(key, "image_channel") == 0)
+				obs_data_set_int(mask, key, obs_data_get_default_int(settings, key));
+			else
+				obs_data_set_double(mask, key, obs_data_get_default_double(settings, key));
+		}
+	}
+	obs_data_set_obj(pos, "mask", mask);
+	obs_data_release(mask);
+	obs_data_release(settings);
+	obs_source_release(filter);
+}
+
+/* Morphs the source's mask to the one saved with the position. */
+static void apply_mask(obs_source_t *source, obs_data_t *pos, float seconds, int easing)
+{
+	obs_data_t *mask = obs_data_get_obj(pos, "mask");
+	obs_source_t *filter = mask ? find_motion_filter(source) : nullptr;
+	if (filter) {
+		calldata_t cd;
+		calldata_init(&cd);
+		calldata_set_float(&cd, "duration", seconds);
+		calldata_set_int(&cd, "easing", easing);
+		proc_handler_call(obs_source_get_proc_handler(filter), "acm_begin_morph", &cd);
+		calldata_free(&cd);
+		obs_source_update(filter, mask);
+	}
+	obs_source_release(filter);
+	obs_data_release(mask);
 }
 
 /* ------------------------------------------------------------------ */
@@ -391,6 +482,7 @@ void MotionDock::SaveNew()
 	obs_data_t *pos = obs_data_create();
 	obs_data_set_string(pos, "name", name.toUtf8().constData());
 	acm_transform_to_data(&t, pos);
+	save_mask(item, pos);
 	obs_data_array_push_back(positions, pos);
 	obs_data_release(pos);
 	acm_positions_set(item, positions);
@@ -420,6 +512,7 @@ void MotionDock::UpdateSelected()
 		struct acm_transform t;
 		acm_transform_from_item(item, &t);
 		acm_transform_to_data(&t, pos);
+		save_mask(item, pos);
 		SetStatus(T("Dock.Updated").arg(QString::fromUtf8(obs_data_get_string(pos, "name"))));
 		obs_data_release(pos);
 	}
@@ -530,6 +623,7 @@ bool MotionDock::GoToName(const QString &name)
 	}
 
 	int moved = 0;
+	obs_source_t *masked = nullptr; /* both scenes may show the same source: morph its mask once */
 	for (obs_source_t *sceneSource : scenes) {
 		obs_sceneitem_t *item = FindItem(sceneSource);
 		if (item) {
@@ -540,6 +634,11 @@ bool MotionDock::GoToName(const QString &name)
 				struct acm_transform t;
 				acm_transform_from_data(pos, &t);
 				acm_animate(item, &t, seconds, ease);
+				obs_source_t *source = obs_sceneitem_get_source(item);
+				if (source != masked) {
+					apply_mask(source, pos, seconds, ease);
+					masked = source;
+				}
 				obs_data_release(pos);
 				moved++;
 			}
@@ -600,6 +699,23 @@ void MotionDock::GoPrevious()
 	if (from < 0)
 		from = 0;
 	GoToIndex((from - 1 + count) % count);
+}
+
+void MotionDock::SaveForSource(obs_source_t *source)
+{
+	ShowDock();
+	SetTarget(obs_source_get_uuid(source));
+	SaveNew();
+}
+
+void MotionDock::ShowDock()
+{
+	QWidget *frame = parentWidget();
+	if (frame) {
+		frame->setVisible(true);
+		frame->raise();
+	}
+	setVisible(true);
 }
 
 void MotionDock::ShowKofi()
@@ -693,6 +809,18 @@ static void save_callback(obs_data_t *save_data, bool saving, void *)
 				    hotkey_pos[i]);
 		obs_data_release(data);
 	}
+}
+
+extern "C" void acm_dock_save_for_source(obs_source_t *source)
+{
+	if (dock && source)
+		dock->SaveForSource(source);
+}
+
+extern "C" void acm_dock_show(void)
+{
+	if (dock)
+		dock->ShowDock();
 }
 
 extern "C" void acm_dock_load(void)

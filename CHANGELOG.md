@@ -4,6 +4,22 @@ Each `## <version>` section becomes the description of that release. The plugin'
 its items before installing and again the first time OBS opens the new version (the Spanish ones
 when OBS is in Spanish, the English ones otherwise).
 
+## 1.3.0
+
+### Español
+
+- **Nuevo:** cada posición guarda también la forma de la máscara. Por ejemplo, rectángulo abajo a la derecha y círculo arriba a la derecha en la misma escena.
+- **Nuevo:** al moverse, la forma se transforma mientras la fuente viaja (rectángulo, círculo, elipse y sin máscara); imagen y degradado cambian con un fundido.
+- **Nuevo:** sección «Posiciones en pantalla» en el filtro, con «Guardar posición actual» y «Abrir panel AC Motion».
+- Las posiciones guardadas con versiones anteriores siguen funcionando (solo mueven, sin cambiar la forma).
+
+### English
+
+- **New:** each position also saves the mask shape. For example, a rectangle bottom right and a circle top right in the same scene.
+- **New:** when moving, the shape morphs while the source travels (rectangle, circle, ellipse and no mask); image and gradient masks change with a fade.
+- **New:** «Screen positions» section in the filter, with «Save current position» and «Open the AC Motion dock».
+- Positions saved with earlier versions still work (they move without changing the shape).
+
 ## 1.2.0
 
 ### Español

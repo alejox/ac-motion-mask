@@ -22,10 +22,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <util/dstr.h>
 #include <util/threading.h>
 #include <math.h>
+#include <string.h>
 
 #define FILTER_ID "ac_motion_mask_filter"
 
 extern void acm_open_support_dialog(void);
+extern void acm_dock_save_for_source(obs_source_t *source);
+extern void acm_dock_show(void);
 #define T_(key) obs_module_text(key)
 
 #ifndef M_PI
@@ -84,6 +87,23 @@ enum pending_cmd {
 	CMD_TOGGLE,
 };
 
+/* What is drawn: rectangle, circle and ellipse are all one rounded box so they
+ * can morph into each other (and into "no mask", a box the size of the source). */
+struct mask_shape {
+	int kind; /* MASK_NONE, MASK_RECT (box), MASK_IMAGE or MASK_GRADIENT */
+	struct vec2 center;
+	struct vec2 half_px;
+	struct vec4 radii;
+	float ellipse;
+	float feather;
+	float invert;
+	struct vec2 size; /* image */
+	float image_channel;
+	float grad_angle;
+	float grad_pos;
+	float grad_width;
+};
+
 struct motion_mask {
 	obs_source_t *context;
 	gs_effect_t *effect;
@@ -123,6 +143,20 @@ struct motion_mask {
 	obs_hotkey_id hotkey_out;
 	obs_hotkey_id hotkey_toggle;
 
+	/* shape on screen (video thread) and the morph towards the settings */
+	struct mask_shape shape;
+	bool morphing;
+	struct mask_shape morph_from;
+	float morph_elapsed;
+	float morph_duration;
+	int morph_easing;
+	float morph_opacity;
+	/* requested by the AC Motion dock before it applies a saved mask */
+	volatile long morph_requested;
+	struct mask_shape morph_request_from;
+	float morph_request_duration;
+	int morph_request_easing;
+
 	/* values sent to the shader */
 	bool draw_nothing;
 	struct vec2 move_offset;
@@ -138,6 +172,8 @@ struct motion_mask {
 	gs_eparam_t *p_source_size;
 	gs_eparam_t *p_mask_center;
 	gs_eparam_t *p_mask_size;
+	gs_eparam_t *p_box_half;
+	gs_eparam_t *p_shape_ellipse;
 	gs_eparam_t *p_corner_radii;
 	gs_eparam_t *p_feather;
 	gs_eparam_t *p_invert_mask;
@@ -250,10 +286,10 @@ static void apply_anim(struct motion_mask *f, int anim, float v)
 		f->opacity = clamp01(v * 2.0f);
 		break;
 	case ANIM_MASK:
-		if (f->mask_type == MASK_NONE) {
+		if (f->shape.kind == MASK_NONE) {
 			f->opacity = clamp01(v);
-		} else if (f->mask_type == MASK_GRADIENT) {
-			float rad = f->grad_angle * (float)(M_PI / 180.0);
+		} else if (f->shape.kind == MASK_GRADIENT) {
+			float rad = f->shape.grad_angle * (float)(M_PI / 180.0);
 			f->wipe_enabled = true;
 			vec2_set(&f->wipe_dir, cosf(rad), sinf(rad));
 			f->wipe_progress = clamp01(v);
@@ -344,6 +380,136 @@ static void register_hotkeys(struct motion_mask *f, obs_source_t *parent)
 	f->hotkeys_registered = true;
 }
 
+/* ------------------------------------------------------------------ */
+/* mask shape and morph                                                */
+
+static void resolve_shape(const struct motion_mask *f, float width, float height, struct mask_shape *out)
+{
+	memset(out, 0, sizeof(*out));
+	out->kind = f->mask_type;
+	out->center = f->mask_center;
+	out->feather = f->feather;
+	out->invert = f->invert ? 1.0f : 0.0f;
+	out->size = f->mask_size;
+	out->image_channel = (float)f->image_channel;
+	out->grad_angle = f->grad_angle;
+	out->grad_pos = f->grad_pos;
+	out->grad_width = f->grad_width;
+
+	struct vec2 half;
+	vec2_set(&half, f->mask_size.x * width * 0.5f, f->mask_size.y * height * 0.5f);
+
+	switch (f->mask_type) {
+	case MASK_NONE:
+		/* the whole source, so it can grow into or out of a shape */
+		vec2_set(&out->center, 0.5f, 0.5f);
+		vec2_set(&out->half_px, width * 0.5f + 2.0f, height * 0.5f + 2.0f);
+		vec4_zero(&out->radii);
+		out->feather = 0.0f;
+		out->invert = 0.0f;
+		break;
+	case MASK_RECT:
+		out->half_px = half;
+		out->radii = f->corner_radii;
+		break;
+	case MASK_CIRCLE: {
+		float s = fminf(half.x, half.y);
+		out->kind = MASK_RECT;
+		vec2_set(&out->half_px, s, s);
+		vec4_set(&out->radii, 1.0f, 1.0f, 1.0f, 1.0f);
+		break;
+	}
+	case MASK_ELLIPSE:
+		out->kind = MASK_RECT;
+		out->half_px = half;
+		vec4_set(&out->radii, 1.0f, 1.0f, 1.0f, 1.0f);
+		out->ellipse = 1.0f;
+		break;
+	default:
+		break;
+	}
+}
+
+static inline bool is_box(int kind)
+{
+	return kind == MASK_NONE || kind == MASK_RECT;
+}
+
+static inline float lerpf(float a, float b, float t)
+{
+	return a + (b - a) * t;
+}
+
+static void lerp_shape(const struct mask_shape *a, const struct mask_shape *b, float t, struct mask_shape *out)
+{
+	*out = *b;
+	out->kind = MASK_RECT;
+	vec2_set(&out->center, lerpf(a->center.x, b->center.x, t), lerpf(a->center.y, b->center.y, t));
+	vec2_set(&out->half_px, fmaxf(lerpf(a->half_px.x, b->half_px.x, t), 1.0f),
+		 fmaxf(lerpf(a->half_px.y, b->half_px.y, t), 1.0f));
+	vec4_set(&out->radii, clamp01(lerpf(a->radii.x, b->radii.x, t)), clamp01(lerpf(a->radii.y, b->radii.y, t)),
+		 clamp01(lerpf(a->radii.z, b->radii.z, t)), clamp01(lerpf(a->radii.w, b->radii.w, t)));
+	out->ellipse = clamp01(lerpf(a->ellipse, b->ellipse, t));
+	out->feather = fmaxf(lerpf(a->feather, b->feather, t), 0.0f);
+}
+
+static void update_shape(struct motion_mask *f, float seconds)
+{
+	obs_source_t *target = obs_filter_get_target(f->context);
+	uint32_t width = target ? obs_source_get_base_width(target) : 0;
+	uint32_t height = target ? obs_source_get_base_height(target) : 0;
+	if (!width || !height)
+		return;
+
+	struct mask_shape to;
+	resolve_shape(f, (float)width, (float)height, &to);
+
+	if (os_atomic_set_long(&f->morph_requested, 0)) {
+		f->morph_from = f->morph_request_from;
+		f->morph_duration = f->morph_request_duration;
+		f->morph_easing = f->morph_request_easing;
+		f->morph_elapsed = 0.0f;
+		f->morphing = f->morph_duration > 0.0f;
+	}
+
+	f->morph_opacity = 1.0f;
+	if (!f->morphing) {
+		f->shape = to;
+		return;
+	}
+
+	f->morph_elapsed += seconds;
+	float t = f->morph_elapsed / f->morph_duration;
+	if (t >= 1.0f) {
+		f->morphing = false;
+		f->shape = to;
+		return;
+	}
+
+	bool morphable = is_box(f->morph_from.kind) && is_box(to.kind) &&
+			 (f->morph_from.kind == MASK_NONE || to.kind == MASK_NONE || f->morph_from.invert == to.invert);
+	if (morphable) {
+		lerp_shape(&f->morph_from, &to, apply_easing(f->morph_easing, t), &f->shape);
+		if (f->morph_from.kind == MASK_NONE && to.kind == MASK_NONE)
+			f->shape.kind = MASK_NONE;
+	} else {
+		/* image or gradient: fade out the old mask, fade in the new one */
+		f->shape = t < 0.5f ? f->morph_from : to;
+		f->morph_opacity = t < 0.5f ? 1.0f - 2.0f * t : 2.0f * t - 1.0f;
+	}
+}
+
+/* Called by the AC Motion dock right before it applies a saved mask, so the
+ * mask morphs from what is on screen instead of jumping. */
+static void proc_begin_morph(void *data, calldata_t *cd)
+{
+	struct motion_mask *f = data;
+	f->morph_request_from = f->shape;
+	f->morph_request_duration = (float)calldata_float(cd, "duration");
+	f->morph_request_easing = (int)calldata_int(cd, "easing");
+	os_atomic_set_long(&f->morph_requested, 1);
+}
+
 static void motion_mask_tick(void *data, float seconds)
 {
 	struct motion_mask *f = data;
@@ -371,6 +537,7 @@ static void motion_mask_tick(void *data, float seconds)
 	else if (cmd == CMD_OUT)
 		start_anim(f, STATE_OUT);
 
+	update_shape(f, seconds);
 	reset_motion(f);
 
 	if (f->state == STATE_IN || f->state == STATE_OUT) {
@@ -422,7 +589,8 @@ static void motion_mask_render(void *data, gs_effect_t *effect)
 		return;
 	}
 
-	int mask_type = f->mask_type;
+	const struct mask_shape *shape = &f->shape;
+	int mask_type = shape->kind;
 	gs_texture_t *mask_tex = f->image_tex;
 	if (mask_type == MASK_IMAGE && !mask_tex)
 		mask_type = MASK_NONE;
@@ -434,9 +602,11 @@ static void motion_mask_render(void *data, gs_effect_t *effect)
 	vec2_set(&source_size, (float)width, (float)height);
 
 	struct vec2 mask_size;
-	vec2_set(&mask_size, f->mask_size.x * f->mask_scale, f->mask_size.y * f->mask_scale);
+	vec2_set(&mask_size, shape->size.x * f->mask_scale, shape->size.y * f->mask_scale);
+	struct vec2 box_half;
+	vec2_set(&box_half, shape->half_px.x * f->mask_scale, shape->half_px.y * f->mask_scale);
 
-	float rad = f->grad_angle * (float)(M_PI / 180.0);
+	float rad = shape->grad_angle * (float)(M_PI / 180.0);
 	struct vec2 grad_dir;
 	vec2_set(&grad_dir, cosf(rad), sinf(rad));
 
@@ -444,18 +614,20 @@ static void motion_mask_render(void *data, gs_effect_t *effect)
 		gs_effect_set_texture(f->p_mask_image, mask_tex);
 	gs_effect_set_int(f->p_mask_type, mask_type);
 	gs_effect_set_vec2(f->p_source_size, &source_size);
-	gs_effect_set_vec2(f->p_mask_center, &f->mask_center);
+	gs_effect_set_vec2(f->p_mask_center, &shape->center);
 	gs_effect_set_vec2(f->p_mask_size, &mask_size);
-	gs_effect_set_vec4(f->p_corner_radii, &f->corner_radii);
-	gs_effect_set_float(f->p_feather, f->feather);
-	gs_effect_set_float(f->p_invert_mask, f->invert ? 1.0f : 0.0f);
-	gs_effect_set_float(f->p_image_channel, (float)f->image_channel);
+	gs_effect_set_vec2(f->p_box_half, &box_half);
+	gs_effect_set_vec4(f->p_corner_radii, &shape->radii);
+	gs_effect_set_float(f->p_shape_ellipse, shape->ellipse);
+	gs_effect_set_float(f->p_feather, shape->feather);
+	gs_effect_set_float(f->p_invert_mask, shape->invert);
+	gs_effect_set_float(f->p_image_channel, shape->image_channel);
 	gs_effect_set_vec2(f->p_grad_dir, &grad_dir);
-	gs_effect_set_float(f->p_grad_pos, f->grad_pos);
-	gs_effect_set_float(f->p_grad_width, f->grad_width);
+	gs_effect_set_float(f->p_grad_pos, shape->grad_pos);
+	gs_effect_set_float(f->p_grad_width, shape->grad_width);
 	gs_effect_set_vec2(f->p_move_offset, &f->move_offset);
 	gs_effect_set_float(f->p_move_scale, f->move_scale);
-	gs_effect_set_float(f->p_opacity, f->opacity);
+	gs_effect_set_float(f->p_opacity, f->opacity * f->morph_opacity);
 	gs_effect_set_float(f->p_wipe_enabled, f->wipe_enabled ? 1.0f : 0.0f);
 	gs_effect_set_vec2(f->p_wipe_dir, &f->wipe_dir);
 	gs_effect_set_float(f->p_wipe_progress, f->wipe_progress);
@@ -696,6 +868,26 @@ static bool test_out_clicked(obs_properties_t *props, obs_property_t *p, void *d
 	return false;
 }
 
+static bool save_position_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	struct motion_mask *f = data;
+	obs_source_t *parent = obs_filter_get_parent(f->context);
+	if (parent)
+		acm_dock_save_for_source(parent);
+	return false;
+}
+
+static bool open_dock_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(props);
+	UNUSED_PARAMETER(p);
+	UNUSED_PARAMETER(data);
+	acm_dock_show();
+	return false;
+}
+
 static bool support_clicked(obs_properties_t *props, obs_property_t *p, void *data)
 {
 	UNUSED_PARAMETER(props);
@@ -824,6 +1016,13 @@ static obs_properties_t *motion_mask_properties(void *data)
 
 	obs_properties_add_group(props, "anim_group", T_("Group.Animation"), OBS_GROUP_NORMAL, anim);
 
+	/* --- screen positions (moved live from the AC Motion dock) --- */
+	obs_properties_t *positions = obs_properties_create();
+	obs_properties_add_text(positions, "positions_hint", T_("Positions.Hint"), OBS_TEXT_INFO);
+	obs_properties_add_button2(positions, "save_position", T_("Positions.Save"), save_position_clicked, data);
+	obs_properties_add_button2(positions, "open_dock", T_("Positions.OpenDock"), open_dock_clicked, data);
+	obs_properties_add_group(props, "positions_group", T_("Group.Positions"), OBS_GROUP_NORMAL, positions);
+
 	obs_properties_add_button2(props, "support", T_("Support.Button"), support_clicked, NULL);
 
 	return props;
@@ -868,7 +1067,11 @@ static void *motion_mask_create(obs_data_t *settings, obs_source_t *context)
 	f->hotkey_out = OBS_INVALID_HOTKEY_ID;
 	f->hotkey_toggle = OBS_INVALID_HOTKEY_ID;
 	f->state = STATE_SHOWN;
+	f->morph_opacity = 1.0f;
 	reset_motion(f);
+
+	proc_handler_t *ph = obs_source_get_proc_handler(context);
+	proc_handler_add(ph, "void acm_begin_morph(in float duration, in int easing)", proc_begin_morph, f);
 
 	char *effect_path = obs_module_file("effects/motion-mask.effect");
 	char *error = NULL;
@@ -886,6 +1089,8 @@ static void *motion_mask_create(obs_data_t *settings, obs_source_t *context)
 		f->p_source_size = gs_effect_get_param_by_name(f->effect, "source_size");
 		f->p_mask_center = gs_effect_get_param_by_name(f->effect, "mask_center");
 		f->p_mask_size = gs_effect_get_param_by_name(f->effect, "mask_size");
+		f->p_box_half = gs_effect_get_param_by_name(f->effect, "box_half");
+		f->p_shape_ellipse = gs_effect_get_param_by_name(f->effect, "shape_ellipse");
 		f->p_corner_radii = gs_effect_get_param_by_name(f->effect, "corner_radii");
 		f->p_feather = gs_effect_get_param_by_name(f->effect, "feather");
 		f->p_invert_mask = gs_effect_get_param_by_name(f->effect, "invert_mask");

@@ -30,6 +30,7 @@ Los atajos se asignan en *Ajustes → Atajos*, bajo el nombre de la fuente.
 - **Fijar** mantiene el panel en esa fuente aunque selecciones otra.
 - Cada escena guarda sus propias posiciones; en Modo Estudio se mueve la fuente en Programa usando el mismo nombre de posición.
 - Clic derecho en una posición para renombrarla, actualizarla o eliminarla.
+- Si la fuente tiene el filtro AC Motion Mask, cada posición guarda también la forma de la máscara y la transforma al moverse (por ejemplo, rectángulo abajo y círculo arriba). También puedes guardar desde el filtro: *Posiciones en pantalla → Guardar posición actual*.
 
 > Nota: la animación ocurre dentro del área de la propia fuente. La salida se dispara con atajo o botón (OBS no avisa a un filtro antes de ocultar la fuente).
 

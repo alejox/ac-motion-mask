@@ -28,6 +28,9 @@ public:
 	~MotionDock() override;
 
 	void SaveState(obs_data_t *data) const;
+	/* "Save current position" from the filter's properties */
+	void SaveForSource(obs_source_t *source);
+	void ShowDock();
 	void LoadState(obs_data_t *data);
 
 public slots:
@@ -84,3 +87,5 @@ private:
 
 extern "C" void acm_dock_load(void);
 extern "C" void acm_dock_unload(void);
+extern "C" void acm_dock_save_for_source(obs_source_t *source);
+extern "C" void acm_dock_show(void);
