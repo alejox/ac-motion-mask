@@ -17,6 +17,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include <obs-module.h>
+#include <obs-frontend-api.h>
+#include "motion-engine.h"
 #include <graphics/vec2.h>
 #include <graphics/vec4.h>
 #include <util/dstr.h>
@@ -27,8 +29,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define FILTER_ID "ac_motion_mask_filter"
 
 extern void acm_open_support_dialog(void);
-extern void acm_dock_save_for_source(obs_source_t *source);
-extern void acm_dock_show(void);
+extern bool acm_confirm(const char *text);
+
+#define POSITION_HOTKEYS 9
 #define T_(key) obs_module_text(key)
 
 #ifndef M_PI
@@ -142,6 +145,14 @@ struct motion_mask {
 	obs_hotkey_id hotkey_in;
 	obs_hotkey_id hotkey_out;
 	obs_hotkey_id hotkey_toggle;
+	obs_hotkey_id hotkey_pos[POSITION_HOTKEYS];
+	obs_hotkey_id hotkey_next;
+	obs_hotkey_id hotkey_prev;
+
+	/* saved screen positions (kept on the scene item, see motion-engine.h) */
+	float move_duration;
+	int move_easing;
+	int last_index;
 
 	/* shape on screen (video thread) and the morph towards the settings */
 	struct mask_shape shape;
@@ -151,7 +162,7 @@ struct motion_mask {
 	float morph_duration;
 	int morph_easing;
 	float morph_opacity;
-	/* requested by the AC Motion dock before it applies a saved mask */
+	/* requested when moving to a saved position */
 	volatile long morph_requested;
 	struct mask_shape morph_request_from;
 	float morph_request_duration;
@@ -357,6 +368,8 @@ static void motion_mask_hotkey_toggle(void *data, obs_hotkey_id id, obs_hotkey_t
 		os_atomic_set_long(&f->pending, CMD_TOGGLE);
 }
 
+static void position_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed);
+
 static void register_hotkeys(struct motion_mask *f, obs_source_t *parent)
 {
 	const char *filter_name = obs_source_get_name(f->context);
@@ -374,6 +387,18 @@ static void register_hotkeys(struct motion_mask *f, obs_source_t *parent)
 	dstr_printf(&name, "ac_motion_mask.toggle.%s", filter_name);
 	dstr_printf(&desc, "%s: %s", filter_name, T_("Hotkey.Toggle"));
 	f->hotkey_toggle = obs_hotkey_register_source(parent, name.array, desc.array, motion_mask_hotkey_toggle, f);
+
+	for (int i = 0; i < POSITION_HOTKEYS; i++) {
+		dstr_printf(&name, "ac_motion_mask.position_%d.%s", i + 1, filter_name);
+		dstr_printf(&desc, "%s: %s %d", filter_name, T_("Hotkey.Position"), i + 1);
+		f->hotkey_pos[i] = obs_hotkey_register_source(parent, name.array, desc.array, position_hotkey, f);
+	}
+	dstr_printf(&name, "ac_motion_mask.next.%s", filter_name);
+	dstr_printf(&desc, "%s: %s", filter_name, T_("Hotkey.NextPosition"));
+	f->hotkey_next = obs_hotkey_register_source(parent, name.array, desc.array, position_hotkey, f);
+	dstr_printf(&name, "ac_motion_mask.prev.%s", filter_name);
+	dstr_printf(&desc, "%s: %s", filter_name, T_("Hotkey.PrevPosition"));
+	f->hotkey_prev = obs_hotkey_register_source(parent, name.array, desc.array, position_hotkey, f);
 
 	dstr_free(&name);
 	dstr_free(&desc);
@@ -497,17 +522,6 @@ static void update_shape(struct motion_mask *f, float seconds)
 		f->shape = t < 0.5f ? f->morph_from : to;
 		f->morph_opacity = t < 0.5f ? 1.0f - 2.0f * t : 2.0f * t - 1.0f;
 	}
-}
-
-/* Called by the AC Motion dock right before it applies a saved mask, so the
- * mask morphs from what is on screen instead of jumping. */
-static void proc_begin_morph(void *data, calldata_t *cd)
-{
-	struct motion_mask *f = data;
-	f->morph_request_from = f->shape;
-	f->morph_request_duration = (float)calldata_float(cd, "duration");
-	f->morph_request_easing = (int)calldata_int(cd, "easing");
-	os_atomic_set_long(&f->morph_requested, 1);
 }
 
 static void motion_mask_tick(void *data, float seconds)
@@ -702,6 +716,8 @@ static void motion_mask_update(void *data, obs_data_t *settings)
 	f->easing = (int)obs_data_get_int(settings, "easing");
 	f->duration = (float)obs_data_get_int(settings, "duration") / 1000.0f;
 	f->delay = (float)obs_data_get_int(settings, "delay") / 1000.0f;
+	f->move_duration = (float)obs_data_get_int(settings, "move_duration") / 1000.0f;
+	f->move_easing = (int)obs_data_get_int(settings, "move_easing");
 
 	if (f->mask_type == MASK_IMAGE)
 		load_image(f, obs_data_get_string(settings, "image_path"));
@@ -734,6 +750,9 @@ static void motion_mask_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "easing", EASE_BACK);
 	obs_data_set_default_int(settings, "duration", 500);
 	obs_data_set_default_int(settings, "delay", 0);
+	obs_data_set_default_int(settings, "position_index", 0);
+	obs_data_set_default_int(settings, "move_duration", 700);
+	obs_data_set_default_int(settings, "move_easing", EASE_OUT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -868,24 +887,428 @@ static bool test_out_clicked(obs_properties_t *props, obs_property_t *p, void *d
 	return false;
 }
 
-static bool save_position_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+/* ------------------------------------------------------------------ */
+/* screen positions: where the source sits + the mask shape it has there */
+
+static const char *const mask_keys[] = {
+	"mask_type",     "mask_width", "mask_height", "mask_x",     "mask_y",  "corner_radius", "corner_individual",
+	"corner_tl",     "corner_tr",  "corner_br",   "corner_bl",  "feather", "invert",        "image_path",
+	"image_channel", "grad_angle", "grad_pos",    "grad_width",
+};
+
+/* Scene being arranged: the preview in Studio Mode, otherwise the current
+ * scene. Returns a new reference. */
+static obs_source_t *editing_scene(void)
 {
-	UNUSED_PARAMETER(props);
-	UNUSED_PARAMETER(p);
-	struct motion_mask *f = data;
-	obs_source_t *parent = obs_filter_get_parent(f->context);
-	if (parent)
-		acm_dock_save_for_source(parent);
-	return false;
+	if (obs_frontend_preview_program_mode_active())
+		return obs_frontend_get_current_preview_scene();
+	return obs_frontend_get_current_scene();
 }
 
-static bool open_dock_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+/* The filtered source inside that scene (new reference) or NULL. */
+static obs_sceneitem_t *find_item(struct motion_mask *f, obs_source_t *scene_source)
+{
+	obs_source_t *parent = obs_filter_get_parent(f->context);
+	obs_scene_t *scene = scene_source ? obs_scene_from_source(scene_source) : NULL;
+	if (!parent || !scene)
+		return NULL;
+	obs_sceneitem_t *item = obs_scene_find_source_recursive(scene, obs_source_get_name(parent));
+	if (item)
+		obs_sceneitem_addref(item);
+	return item;
+}
+
+/* Item whose positions are listed: the scene being arranged, or the live one. */
+static obs_sceneitem_t *editing_item(struct motion_mask *f)
+{
+	obs_source_t *scene = editing_scene();
+	obs_sceneitem_t *item = find_item(f, scene);
+	obs_source_release(scene);
+	if (!item) {
+		scene = obs_frontend_get_current_scene();
+		item = find_item(f, scene);
+		obs_source_release(scene);
+	}
+	return item;
+}
+
+static void save_mask(struct motion_mask *f, obs_data_t *pos)
+{
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	obs_data_t *mask = obs_data_create();
+	for (size_t i = 0; i < sizeof(mask_keys) / sizeof(mask_keys[0]); i++) {
+		const char *key = mask_keys[i];
+		if (strcmp(key, "image_path") == 0)
+			obs_data_set_string(mask, key, obs_data_get_string(settings, key));
+		else if (strcmp(key, "corner_individual") == 0 || strcmp(key, "invert") == 0)
+			obs_data_set_bool(mask, key, obs_data_get_bool(settings, key));
+		else if (strcmp(key, "mask_type") == 0 || strcmp(key, "image_channel") == 0)
+			obs_data_set_int(mask, key, obs_data_get_int(settings, key));
+		else
+			obs_data_set_double(mask, key, obs_data_get_double(settings, key));
+	}
+	obs_data_set_obj(pos, "mask", mask);
+	obs_data_release(mask);
+	obs_data_release(settings);
+}
+
+/* Morphs the mask from what is on screen to the one saved with the position. */
+static void apply_mask(struct motion_mask *f, obs_data_t *pos)
+{
+	obs_data_t *mask = obs_data_get_obj(pos, "mask");
+	if (!mask)
+		return;
+	f->morph_request_from = f->shape;
+	f->morph_request_duration = f->move_duration;
+	f->morph_request_easing = f->move_easing;
+	os_atomic_set_long(&f->morph_requested, 1);
+	obs_source_update(f->context, mask);
+	obs_data_release(mask);
+}
+
+static int positions_count(struct motion_mask *f)
+{
+	obs_sceneitem_t *item = editing_item(f);
+	if (!item)
+		return 0;
+	obs_data_array_t *positions = acm_positions_get(item);
+	int count = (int)obs_data_array_count(positions);
+	obs_data_array_release(positions);
+	obs_sceneitem_release(item);
+	return count;
+}
+
+/* Moves the source (in the live scene and in the one being arranged) to the
+ * position with that name, and morphs the mask to the shape saved with it. */
+static bool go_to_name(struct motion_mask *f, const char *name)
+{
+	obs_source_t *scenes[2] = {obs_frontend_get_current_scene(), editing_scene()};
+	if (scenes[1] == scenes[0]) {
+		obs_source_release(scenes[1]);
+		scenes[1] = NULL;
+	}
+
+	bool moved = false;
+	for (size_t s = 0; s < 2; s++) {
+		obs_sceneitem_t *item = find_item(f, scenes[s]);
+		if (item) {
+			obs_data_array_t *positions = acm_positions_get(item);
+			int index = acm_positions_find(positions, name);
+			if (index >= 0) {
+				obs_data_t *pos = obs_data_array_item(positions, (size_t)index);
+				struct acm_transform t;
+				acm_transform_from_data(pos, &t);
+				acm_animate(item, &t, f->move_duration, f->move_easing);
+				if (!moved)
+					apply_mask(f, pos);
+				moved = true;
+				obs_data_release(pos);
+			}
+			obs_data_array_release(positions);
+			obs_sceneitem_release(item);
+		}
+		obs_source_release(scenes[s]);
+	}
+	return moved;
+}
+
+static bool go_to_index(struct motion_mask *f, int index)
+{
+	obs_sceneitem_t *item = editing_item(f);
+	if (!item)
+		return false;
+
+	bool moved = false;
+	obs_data_array_t *positions = acm_positions_get(item);
+	if (index >= 0 && index < (int)obs_data_array_count(positions)) {
+		obs_data_t *pos = obs_data_array_item(positions, (size_t)index);
+		char *name = bstrdup(obs_data_get_string(pos, "name"));
+		obs_data_release(pos);
+		moved = go_to_name(f, name);
+		bfree(name);
+		if (moved)
+			f->last_index = index;
+	}
+	obs_data_array_release(positions);
+	obs_sceneitem_release(item);
+	return moved;
+}
+
+/* Hotkeys arrive on the hotkey thread; the move runs on the UI thread. */
+#define GO_NEXT -1
+#define GO_PREV -2
+
+struct go_task {
+	obs_weak_source_t *filter;
+	int index;
+};
+
+static void go_task_run(void *param)
+{
+	struct go_task *task = param;
+	obs_source_t *filter = obs_weak_source_get_source(task->filter);
+	if (filter) {
+		struct motion_mask *f = obs_obj_get_data(filter);
+		int index = task->index;
+		if (f && index < 0) {
+			int count = positions_count(f);
+			if (count > 0) {
+				int from = f->last_index >= 0 ? f->last_index : (index == GO_NEXT ? -1 : 0);
+				index = (from + (index == GO_NEXT ? 1 : -1) + count) % count;
+			}
+		}
+		if (f && index >= 0) {
+			go_to_index(f, index);
+			obs_data_t *settings = obs_source_get_settings(filter);
+			obs_data_set_int(settings, "position_index", f->last_index);
+			obs_data_release(settings);
+		}
+		obs_source_release(filter);
+	}
+	obs_weak_source_release(task->filter);
+	bfree(task);
+}
+
+static void position_hotkey(void *data, obs_hotkey_id id, obs_hotkey_t *hotkey, bool pressed)
+{
+	UNUSED_PARAMETER(hotkey);
+	struct motion_mask *f = data;
+	if (!pressed)
+		return;
+
+	int index = GO_NEXT;
+	if (id == f->hotkey_prev)
+		index = GO_PREV;
+	for (int i = 0; i < POSITION_HOTKEYS; i++) {
+		if (id == f->hotkey_pos[i])
+			index = i;
+	}
+
+	struct go_task *task = bzalloc(sizeof(*task));
+	task->filter = obs_source_get_weak_source(f->context);
+	task->index = index;
+	obs_queue_task(OBS_TASK_UI, go_task_run, task, false);
+}
+
+static const char *mask_type_label(int type)
+{
+	switch (type) {
+	case MASK_RECT:
+		return T_("Mask.Rect");
+	case MASK_CIRCLE:
+		return T_("Mask.Circle");
+	case MASK_ELLIPSE:
+		return T_("Mask.Ellipse");
+	case MASK_IMAGE:
+		return T_("Mask.Image");
+	case MASK_GRADIENT:
+		return T_("Mask.Gradient");
+	default:
+		return T_("Mask.None");
+	}
+}
+
+/* Rebuilds the "Saved positions" list: "1 · Name — Shape". */
+static void fill_positions_list(struct motion_mask *f, obs_property_t *list)
+{
+	obs_property_list_clear(list);
+
+	obs_sceneitem_t *item = editing_item(f);
+	obs_data_array_t *positions = item ? acm_positions_get(item) : NULL;
+	size_t count = positions ? obs_data_array_count(positions) : 0;
+
+	if (!count)
+		obs_property_list_add_int(list, item ? T_("Positions.None") : T_("Positions.NotInScene"), 0);
+
+	struct dstr label = {0};
+	for (size_t i = 0; i < count; i++) {
+		obs_data_t *pos = obs_data_array_item(positions, i);
+		obs_data_t *mask = obs_data_get_obj(pos, "mask");
+		if (mask)
+			dstr_printf(&label, "%d · %s — %s", (int)i + 1, obs_data_get_string(pos, "name"),
+				    mask_type_label((int)obs_data_get_int(mask, "mask_type")));
+		else
+			dstr_printf(&label, "%d · %s", (int)i + 1, obs_data_get_string(pos, "name"));
+		obs_property_list_add_int(list, label.array, (long long)i);
+		obs_data_release(mask);
+		obs_data_release(pos);
+	}
+	dstr_free(&label);
+
+	obs_data_array_release(positions);
+	obs_sceneitem_release(item);
+}
+
+/* Unique name for a position: the one typed, or "Position N". */
+static void unique_position_name(obs_data_array_t *positions, const char *wanted, struct dstr *out)
+{
+	if (wanted && *wanted) {
+		dstr_copy(out, wanted);
+		for (int n = 2; acm_positions_find(positions, out->array) >= 0; n++)
+			dstr_printf(out, "%s %d", wanted, n);
+		return;
+	}
+	int n = (int)obs_data_array_count(positions) + 1;
+	do {
+		dstr_printf(out, "%s %d", T_("Positions.DefaultName"), n++);
+	} while (acm_positions_find(positions, out->array) >= 0);
+}
+
+static bool mask_type_changed(obs_properties_t *props, obs_property_t *p, obs_data_t *settings);
+
+static bool position_selected(obs_properties_t *props, obs_property_t *p, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(props);
+	int index = (int)obs_data_get_int(settings, "position_index");
+	const char *label = NULL;
+	for (size_t i = 0; i < obs_property_list_item_count(p); i++) {
+		if (obs_property_list_item_int(p, i) == index)
+			label = obs_property_list_item_name(p, i);
+	}
+	/* label is "N · Name — Shape": put just the name in the Name field */
+	if (label) {
+		const char *start = strstr(label, " · ");
+		const char *end = strstr(label, " — ");
+		if (start) {
+			start += strlen(" · ");
+			struct dstr name = {0};
+			dstr_ncopy(&name, start, end && end > start ? (size_t)(end - start) : strlen(start));
+			obs_data_set_string(settings, "position_name", name.array);
+			dstr_free(&name);
+		}
+	}
+	return true;
+}
+
+static bool refresh_positions(struct motion_mask *f, obs_properties_t *props, int select)
+{
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	obs_property_t *list = obs_properties_get(props, "position_index");
+	fill_positions_list(f, list);
+	obs_data_set_int(settings, "position_index", select < 0 ? 0 : select);
+	position_selected(props, list, settings);
+	mask_type_changed(props, NULL, settings);
+	obs_data_release(settings);
+	return true;
+}
+
+static bool position_go_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
 	UNUSED_PARAMETER(p);
-	UNUSED_PARAMETER(data);
-	acm_dock_show();
-	return false;
+	struct motion_mask *f = data;
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	int index = (int)obs_data_get_int(settings, "position_index");
+	obs_data_release(settings);
+
+	if (!go_to_index(f, index))
+		return false;
+	/* the mask controls now show the shape of that position */
+	return refresh_positions(f, props, index);
+}
+
+static bool position_save_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(p);
+	struct motion_mask *f = data;
+	obs_sceneitem_t *item = editing_item(f);
+	if (!item)
+		return false;
+
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	obs_data_array_t *positions = acm_positions_get(item);
+
+	struct dstr name = {0};
+	unique_position_name(positions, obs_data_get_string(settings, "position_name"), &name);
+
+	struct acm_transform t;
+	acm_transform_from_item(item, &t);
+	obs_data_t *pos = obs_data_create();
+	obs_data_set_string(pos, "name", name.array);
+	acm_transform_to_data(&t, pos);
+	save_mask(f, pos);
+	obs_data_array_push_back(positions, pos);
+	obs_data_release(pos);
+	acm_positions_set(item, positions);
+
+	int index = (int)obs_data_array_count(positions) - 1;
+	f->last_index = index;
+
+	dstr_free(&name);
+	obs_data_array_release(positions);
+	obs_data_release(settings);
+	obs_sceneitem_release(item);
+	return refresh_positions(f, props, index);
+}
+
+static bool position_update_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(p);
+	struct motion_mask *f = data;
+	obs_sceneitem_t *item = editing_item(f);
+	if (!item)
+		return false;
+
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	int index = (int)obs_data_get_int(settings, "position_index");
+	obs_data_array_t *positions = acm_positions_get(item);
+	bool changed = false;
+
+	if (index >= 0 && index < (int)obs_data_array_count(positions)) {
+		obs_data_t *pos = obs_data_array_item(positions, (size_t)index);
+		struct acm_transform t;
+		acm_transform_from_item(item, &t);
+		acm_transform_to_data(&t, pos);
+		save_mask(f, pos);
+
+		/* a different name in the Name field renames it */
+		const char *wanted = obs_data_get_string(settings, "position_name");
+		if (wanted && *wanted && strcmp(wanted, obs_data_get_string(pos, "name")) != 0) {
+			struct dstr name = {0};
+			unique_position_name(positions, wanted, &name);
+			obs_data_set_string(pos, "name", name.array);
+			dstr_free(&name);
+		}
+		obs_data_release(pos);
+		changed = true;
+	}
+
+	obs_data_array_release(positions);
+	obs_data_release(settings);
+	obs_sceneitem_release(item);
+	return changed ? refresh_positions(f, props, index) : false;
+}
+
+static bool position_delete_clicked(obs_properties_t *props, obs_property_t *p, void *data)
+{
+	UNUSED_PARAMETER(p);
+	struct motion_mask *f = data;
+	obs_sceneitem_t *item = editing_item(f);
+	if (!item)
+		return false;
+
+	obs_data_t *settings = obs_source_get_settings(f->context);
+	int index = (int)obs_data_get_int(settings, "position_index");
+	obs_data_release(settings);
+	obs_data_array_t *positions = acm_positions_get(item);
+	bool changed = false;
+
+	if (index >= 0 && index < (int)obs_data_array_count(positions)) {
+		obs_data_t *pos = obs_data_array_item(positions, (size_t)index);
+		struct dstr question = {0};
+		dstr_printf(&question, "%s «%s»?", T_("Positions.DeleteConfirm"), obs_data_get_string(pos, "name"));
+		obs_data_release(pos);
+		if (acm_confirm(question.array)) {
+			obs_data_array_erase(positions, (size_t)index);
+			acm_positions_set(item, positions);
+			f->last_index = -1;
+			changed = true;
+		}
+		dstr_free(&question);
+	}
+
+	obs_data_array_release(positions);
+	obs_sceneitem_release(item);
+	return changed ? refresh_positions(f, props, index > 0 ? index - 1 : 0) : false;
 }
 
 static bool support_clicked(obs_properties_t *props, obs_property_t *p, void *data)
@@ -986,6 +1409,37 @@ static obs_properties_t *motion_mask_properties(void *data)
 
 	obs_properties_add_group(props, "mask_group", T_("Group.Mask"), OBS_GROUP_NORMAL, mask);
 
+	/* --- screen positions: place + shape --- */
+	obs_properties_t *positions = obs_properties_create();
+	obs_properties_add_text(positions, "positions_hint", T_("Positions.Hint"), OBS_TEXT_INFO);
+
+	p = obs_properties_add_list(positions, "position_index", T_("Positions.List"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_INT);
+	if (data)
+		fill_positions_list(data, p);
+	obs_property_set_modified_callback(p, position_selected);
+	obs_properties_add_button2(positions, "position_go", T_("Positions.Go"), position_go_clicked, data);
+
+	p = obs_properties_add_int_slider(positions, "move_duration", T_("Positions.Duration"), 0, 5000, 50);
+	obs_property_int_set_suffix(p, " ms");
+	p = obs_properties_add_list(positions, "move_easing", T_("Anim.Easing"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, T_("Easing.Out"), EASE_OUT);
+	obs_property_list_add_int(p, T_("Easing.InOut"), EASE_IN_OUT);
+	obs_property_list_add_int(p, T_("Easing.Back"), EASE_BACK);
+	obs_property_list_add_int(p, T_("Easing.Elastic"), EASE_ELASTIC);
+	obs_property_list_add_int(p, T_("Easing.Bounce"), EASE_BOUNCE);
+	obs_property_list_add_int(p, T_("Easing.Linear"), EASE_LINEAR);
+
+	p = obs_properties_add_text(positions, "position_name", T_("Positions.Name"), OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p, T_("Positions.Name.Tip"));
+	obs_properties_add_button2(positions, "position_save", T_("Positions.Save"), position_save_clicked, data);
+	obs_properties_add_button2(positions, "position_update", T_("Positions.Update"), position_update_clicked, data);
+	obs_properties_add_button2(positions, "position_delete", T_("Positions.Delete"), position_delete_clicked, data);
+	obs_properties_add_text(positions, "positions_hotkeys", T_("Positions.Hotkeys"), OBS_TEXT_INFO);
+
+	obs_properties_add_group(props, "positions_group", T_("Group.Positions"), OBS_GROUP_NORMAL, positions);
+
 	/* --- animation --- */
 	obs_properties_t *anim = obs_properties_create();
 
@@ -1016,13 +1470,6 @@ static obs_properties_t *motion_mask_properties(void *data)
 
 	obs_properties_add_group(props, "anim_group", T_("Group.Animation"), OBS_GROUP_NORMAL, anim);
 
-	/* --- screen positions (moved live from the AC Motion dock) --- */
-	obs_properties_t *positions = obs_properties_create();
-	obs_properties_add_text(positions, "positions_hint", T_("Positions.Hint"), OBS_TEXT_INFO);
-	obs_properties_add_button2(positions, "save_position", T_("Positions.Save"), save_position_clicked, data);
-	obs_properties_add_button2(positions, "open_dock", T_("Positions.OpenDock"), open_dock_clicked, data);
-	obs_properties_add_group(props, "positions_group", T_("Group.Positions"), OBS_GROUP_NORMAL, positions);
-
 	obs_properties_add_button2(props, "support", T_("Support.Button"), support_clicked, NULL);
 
 	return props;
@@ -1045,6 +1492,10 @@ static void motion_mask_destroy(void *data)
 		obs_hotkey_unregister(f->hotkey_in);
 		obs_hotkey_unregister(f->hotkey_out);
 		obs_hotkey_unregister(f->hotkey_toggle);
+		obs_hotkey_unregister(f->hotkey_next);
+		obs_hotkey_unregister(f->hotkey_prev);
+		for (int i = 0; i < POSITION_HOTKEYS; i++)
+			obs_hotkey_unregister(f->hotkey_pos[i]);
 	}
 
 	unload_image(f);
@@ -1066,12 +1517,14 @@ static void *motion_mask_create(obs_data_t *settings, obs_source_t *context)
 	f->hotkey_in = OBS_INVALID_HOTKEY_ID;
 	f->hotkey_out = OBS_INVALID_HOTKEY_ID;
 	f->hotkey_toggle = OBS_INVALID_HOTKEY_ID;
+	f->hotkey_next = OBS_INVALID_HOTKEY_ID;
+	f->hotkey_prev = OBS_INVALID_HOTKEY_ID;
+	for (int i = 0; i < POSITION_HOTKEYS; i++)
+		f->hotkey_pos[i] = OBS_INVALID_HOTKEY_ID;
+	f->last_index = -1;
 	f->state = STATE_SHOWN;
 	f->morph_opacity = 1.0f;
 	reset_motion(f);
-
-	proc_handler_t *ph = obs_source_get_proc_handler(context);
-	proc_handler_add(ph, "void acm_begin_morph(in float duration, in int easing)", proc_begin_morph, f);
 
 	char *effect_path = obs_module_file("effects/motion-mask.effect");
 	char *error = NULL;

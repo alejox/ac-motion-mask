@@ -11,7 +11,7 @@ A single OBS Studio filter that combines **masks** and **motion** — set up in 
 - **Estilos de movimiento:** lineal, suave, con rebase, elástico y rebote.
 - **Disparo automático** cuando la fuente aparece, o manual con atajos de teclado (entrada, salida, alternar).
 - Botones **Probar entrada / Probar salida** dentro del filtro.
-- **Panel AC Motion:** guarda tantas posiciones como quieras para cualquier fuente (posición, tamaño, rotación y recorte) y muévela entre ellas en vivo con animación.
+- **Posiciones en pantalla:** guarda tantas posiciones como quieras (lugar, tamaño y forma) y mueve la fuente entre ellas con animación; la forma se transforma en el camino.
 
 ## Uso
 
@@ -21,18 +21,15 @@ A single OBS Studio filter that combines **masks** and **motion** — set up in 
 
 Los atajos se asignan en *Ajustes → Atajos*, bajo el nombre de la fuente.
 
-### Mover la fuente por la pantalla (panel AC Motion)
+### Mover la fuente por la pantalla (posiciones)
 
-1. Abre el panel en *Paneles → AC Motion*.
-2. Selecciona la fuente en la escena, colócala donde quieras y pulsa **Guardar posición**. Repite para cada lugar.
-3. En vivo: doble clic en una posición, **Mover aquí**, ◀ ▶ o los atajos *AC Motion: ir a la posición 1–9 / siguiente / anterior*.
+Todo se hace en las propiedades del filtro, sección **2 · Posiciones en pantalla**:
 
-- **Fijar** mantiene el panel en esa fuente aunque selecciones otra.
-- Cada escena guarda sus propias posiciones; en Modo Estudio se mueve la fuente en Programa usando el mismo nombre de posición.
-- Clic derecho en una posición para renombrarla, actualizarla o eliminarla.
-- Si la fuente tiene el filtro AC Motion Mask, cada posición guarda también la forma de la máscara y la transforma al moverse (por ejemplo, rectángulo abajo y círculo arriba). También puedes guardar desde el filtro: *Posiciones en pantalla → Guardar posición actual*.
+1. Coloca la fuente en el lienzo y elige su forma en **1 · Forma**.
+2. Pulsa **Guardar como posición nueva**. Repite en otro lugar, con otra forma si quieres.
+3. Elige una posición y pulsa **Mover a esta posición**: la fuente viaja y cambia de forma.
 
-> Nota: la animación ocurre dentro del área de la propia fuente. La salida se dispara con atajo o botón (OBS no avisa a un filtro antes de ocultar la fuente).
+En vivo usa los atajos *Ir a la posición 1–9* y *Posición siguiente / anterior* (Ajustes → Atajos, bajo el nombre de la fuente). Cada escena guarda sus propias posiciones.
 
 ## Actualizaciones
 

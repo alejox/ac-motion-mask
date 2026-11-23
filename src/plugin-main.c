@@ -23,19 +23,19 @@ OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
 extern struct obs_source_info motion_mask_filter_info;
-extern void acm_dock_load(void);
-extern void acm_dock_unload(void);
+extern void acm_frontend_load(void);
+extern void acm_frontend_unload(void);
 
 bool obs_module_load(void)
 {
 	obs_register_source(&motion_mask_filter_info);
-	acm_dock_load();
+	acm_frontend_load();
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	return true;
 }
 
 void obs_module_unload(void)
 {
-	acm_dock_unload();
+	acm_frontend_unload();
 	obs_log(LOG_INFO, "plugin unloaded");
 }

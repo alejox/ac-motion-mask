@@ -4,6 +4,24 @@ Each `## <version>` section becomes the description of that release. The plugin'
 its items before installing and again the first time OBS opens the new version (the Spanish ones
 when OBS is in Spanish, the English ones otherwise).
 
+## 1.4.0
+
+### Español
+
+- **Más simple:** todo está ahora en las propiedades del filtro, en tres pasos numerados: 1 · Forma, 2 · Posiciones en pantalla, 3 · Entrada y salida. Se quitó el panel AC Motion.
+- **Posiciones en el filtro:** lista de posiciones guardadas (con su forma), «Mover a esta posición», «Guardar como posición nueva», «Reemplazar» y «Eliminar».
+- Cada posición guarda lugar, tamaño y forma; al moverse, la fuente viaja y cambia de forma.
+- Atajos por fuente: ir a la posición 1–9, siguiente y anterior (Ajustes → Atajos, bajo el nombre de la fuente). Los atajos del panel anterior hay que volver a asignarlos.
+- Tus posiciones guardadas se conservan.
+
+### English
+
+- **Simpler:** everything now lives in the filter properties, in three numbered steps: 1 · Shape, 2 · Screen positions, 3 · Entrance and exit. The AC Motion dock was removed.
+- **Positions in the filter:** list of saved positions (with their shape), «Move to this position», «Save as new position», «Replace» and «Delete».
+- Each position saves place, size and shape; when moving, the source travels and changes shape.
+- Per-source hotkeys: go to position 1–9, next and previous (Settings → Hotkeys, under the source name). Hotkeys from the old dock must be assigned again.
+- Your saved positions are kept.
+
 ## 1.3.0
 
 ### Español

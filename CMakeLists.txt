@@ -40,8 +40,7 @@ target_sources(
     src/plugin-main.c
     src/motion-mask-filter.c
     src/motion-engine.c
-    src/motion-dock.cpp
-    src/motion-dock.hpp
+    src/frontend.cpp
     src/updater.cpp
     src/updater.hpp
     src/updater-install.cpp

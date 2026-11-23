@@ -14,6 +14,7 @@ del panel AC Motion o el botón al final de las propiedades del filtro); nunca a
 #include <QDialog>
 #include <QLabel>
 #include <QMainWindow>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -76,4 +77,12 @@ void acm_open_support_dialog_qt(QWidget *parent)
 extern "C" void acm_open_support_dialog(void)
 {
 	acm_open_support_dialog_qt(static_cast<QMainWindow *>(obs_frontend_get_main_window()));
+}
+
+/* Yes/No question over the main window, for the filter (C). */
+extern "C" bool acm_confirm(const char *text)
+{
+	auto *parent = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	return QMessageBox::question(parent, QStringLiteral("AC Motion Mask"), QString::fromUtf8(text),
+				     QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
 }
